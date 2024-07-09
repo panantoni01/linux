@@ -2475,6 +2475,9 @@ Params: addr                    Set the address for the ADT7410, BH1750, BME280,
         si7020                  Select the Silicon Labs Si7013/20/21 humidity/
                                 temperature sensor
 
+        si7210                  Select the Silicon Labs Si7210 Hall effect
+                                sensor. Valid addresses 0x30-0x33, default 0x30
+
         sps30                   Select the Sensirion SPS30 particulate matter
                                 sensor. Fixed address 0x69.
 
