@@ -2484,6 +2484,10 @@ Params: addr                    Set the address for the ADT7410, BH1750, BME280,
         tmp102                  Select the Texas Instruments TMP102 temp sensor
                                 Valid addresses 0x48-0x4b, default 0x48
 
+        tmp006                  Select the Texas Instruments TMP006 temp sensor
+                                Valid addresses are configurable via ADR0, ADR1
+                                pins (0x40, 0x42-0x44, 0x46-0x47), default 0x40
+
         tsl4531                 Select the AMS TSL4531 digital ambient light
                                 sensor
 
@@ -3312,7 +3316,7 @@ Params: speed                   SPI bus speed (default 32000000)
 Name:   miniuart-bt
 Info:   Switch the onboard Bluetooth function of a BT-equipped Raspberry Pi
         to use the mini-UART (ttyS0) and restore UART0/ttyAMA0 over GPIOs 14 &
-        15. Note that this option uses a lower baudrate, and should only be used
+        1.  Note that this option uses a lower baudrate, and should only be used
         with low-bandwidth peripherals.
 Load:   dtoverlay=miniuart-bt,<param>=<val>
 Params: krnbt                   Set to "off" to disable autoprobing of Bluetooth
