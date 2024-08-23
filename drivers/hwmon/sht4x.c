@@ -11,6 +11,7 @@
 #include <linux/crc8.h>
 #include <linux/delay.h>
 #include <linux/hwmon.h>
+#include <linux/hwmon-sysfs.h>
 #include <linux/i2c.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
@@ -31,6 +32,12 @@
  */
 #define SHT4X_CMD_MEASURE_HPM	0b11111101
 #define SHT4X_CMD_RESET		0b10010100
+#define SHT4X_CMD_HEATER_20_1	0b00011110
+#define SHT4X_CMD_HEATER_20_01	0b00010101
+#define SHT4X_CMD_HEATER_110_1	0b00101111
+#define SHT4X_CMD_HEATER_110_01	0b00100100
+#define SHT4X_CMD_HEATER_200_1	0b00111001
+#define SHT4X_CMD_HEATER_200_01 0b00110010
 
 #define SHT4X_CMD_LEN		1
 #define SHT4X_CRC8_LEN		1
@@ -53,6 +60,8 @@ DECLARE_CRC8_TABLE(sht4x_crc8_table);
  * @last_updated: the previous time that the SHT4X was polled
  * @temperature: the latest temperature value received from the SHT4X
  * @humidity: the latest humidity value received from the SHT4X
+ * @heater_power: the power at which the heater will be started
+ * @heater_time: the time for which the heater will remain turned on
  */
 struct sht4x_data {
 	struct i2c_client	*client;
@@ -62,6 +71,8 @@ struct sht4x_data {
 	long			last_updated;	/* in jiffies */
 	s32			temperature;
 	s32			humidity;
+	u32			heater_power;	/* in milli-watts */
+	u32			heater_time;	/* in milli-seconds */
 };
 
 /**
@@ -214,6 +225,128 @@ static int sht4x_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 	}
 }
 
+static ssize_t heater_enable_show(struct device *dev,
+				  struct device_attribute *attr,
+				  char *buf)
+{
+	return -EOPNOTSUPP;
+}
+
+static ssize_t heater_enable_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf,
+				   size_t count)
+{
+	struct sht4x_data *data = dev_get_drvdata(dev);
+	bool status;
+	ssize_t ret;
+	u8 cmd[SHT4X_CMD_LEN];
+
+	ret = kstrtobool(buf, &status);
+	if (ret)
+		return ret;
+
+	if (status) {
+		if (data->heater_power == 20) {
+			if (data->heater_time == 100)
+				*cmd = SHT4X_CMD_HEATER_20_01;
+			else /* data->heater_time == 1000 */
+				*cmd = SHT4X_CMD_HEATER_20_1;
+		} else if (data->heater_power == 110) {
+			if (data->heater_time == 100)
+				*cmd = SHT4X_CMD_HEATER_110_01;
+			else /* data->heater_time == 1000 */
+				*cmd = SHT4X_CMD_HEATER_110_1;
+		} else if (data->heater_power == 200) {
+			if (data->heater_time == 100)
+				*cmd = SHT4X_CMD_HEATER_200_01;
+			else /* data->heater_time == 1000 */
+				*cmd = SHT4X_CMD_HEATER_200_1;
+		} else {
+			return -EINVAL;
+		}
+	}
+
+	mutex_lock(&data->lock);
+	ret = i2c_master_send(data->client, cmd, SHT4X_CMD_LEN);
+	mutex_unlock(&data->lock);
+
+	return ret;
+}
+
+static ssize_t heater_power_show(struct device *dev,
+				 struct device_attribute *attr,
+				 char *buf)
+{
+	struct sht4x_data *data = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", data->heater_power);
+}
+
+static ssize_t heater_power_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf,
+				  size_t count)
+{
+	struct sht4x_data *data = dev_get_drvdata(dev);
+	u32 power;
+	ssize_t ret;
+
+	ret = kstrtou32(buf, 10, &power);
+	if (ret)
+		return ret;
+
+	if (power != 20 && power != 110 && power != 200)
+		return -EINVAL;
+
+	data->heater_power = power;
+
+	return count;
+}
+
+static ssize_t heater_time_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	struct sht4x_data *data = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", data->heater_time);
+}
+
+static ssize_t heater_time_store(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf,
+				 size_t count)
+{
+	struct sht4x_data *data = dev_get_drvdata(dev);
+	u32 time;
+	ssize_t ret;
+
+	ret = kstrtou32(buf, 10, &time);
+	if (ret)
+		return ret;
+
+	if (time != 100 && time != 1000)
+		return -EINVAL;
+
+	data->heater_time = time;
+
+	return count;
+}
+
+static SENSOR_DEVICE_ATTR_RW(heater_enable, heater_enable, 0);
+static SENSOR_DEVICE_ATTR_RW(heater_power, heater_power, 0);
+static SENSOR_DEVICE_ATTR_RW(heater_time, heater_time, 0);
+
+static struct attribute *sht4x_attrs[] = {
+	&sensor_dev_attr_heater_enable.dev_attr.attr,
+	&sensor_dev_attr_heater_power.dev_attr.attr,
+	&sensor_dev_attr_heater_time.dev_attr.attr,
+	NULL
+};
+
+ATTRIBUTE_GROUPS(sht4x);
+
 static const struct hwmon_channel_info * const sht4x_info[] = {
 	HWMON_CHANNEL_INFO(chip, HWMON_C_UPDATE_INTERVAL),
 	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT),
@@ -254,6 +387,8 @@ static int sht4x_probe(struct i2c_client *client)
 
 	data->update_interval = SHT4X_MIN_POLL_INTERVAL;
 	data->client = client;
+	data->heater_power = 200;
+	data->heater_time = 1000;
 
 	mutex_init(&data->lock);
 
@@ -269,7 +404,7 @@ static int sht4x_probe(struct i2c_client *client)
 							 client->name,
 							 data,
 							 &sht4x_chip_info,
-							 NULL);
+							 sht4x_groups);
 
 	return PTR_ERR_OR_ZERO(hwmon_dev);
 }
