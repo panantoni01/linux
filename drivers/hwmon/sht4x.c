@@ -225,13 +225,6 @@ static int sht4x_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 	}
 }
 
-static ssize_t heater_enable_show(struct device *dev,
-				  struct device_attribute *attr,
-				  char *buf)
-{
-	return -EOPNOTSUPP;
-}
-
 static ssize_t heater_enable_store(struct device *dev,
 				   struct device_attribute *attr,
 				   const char *buf,
@@ -240,7 +233,7 @@ static ssize_t heater_enable_store(struct device *dev,
 	struct sht4x_data *data = dev_get_drvdata(dev);
 	bool status;
 	ssize_t ret;
-	u8 cmd[SHT4X_CMD_LEN];
+	u8 cmd;
 
 	ret = kstrtobool(buf, &status);
 	if (ret)
@@ -249,27 +242,23 @@ static ssize_t heater_enable_store(struct device *dev,
 	if (status) {
 		if (data->heater_power == 20) {
 			if (data->heater_time == 100)
-				*cmd = SHT4X_CMD_HEATER_20_01;
+				cmd = SHT4X_CMD_HEATER_20_01;
 			else /* data->heater_time == 1000 */
-				*cmd = SHT4X_CMD_HEATER_20_1;
+				cmd = SHT4X_CMD_HEATER_20_1;
 		} else if (data->heater_power == 110) {
 			if (data->heater_time == 100)
-				*cmd = SHT4X_CMD_HEATER_110_01;
+				cmd = SHT4X_CMD_HEATER_110_01;
 			else /* data->heater_time == 1000 */
-				*cmd = SHT4X_CMD_HEATER_110_1;
+				cmd = SHT4X_CMD_HEATER_110_1;
 		} else if (data->heater_power == 200) {
 			if (data->heater_time == 100)
-				*cmd = SHT4X_CMD_HEATER_200_01;
+				cmd = SHT4X_CMD_HEATER_200_01;
 			else /* data->heater_time == 1000 */
-				*cmd = SHT4X_CMD_HEATER_200_1;
-		} else {
-			return -EINVAL;
+				cmd = SHT4X_CMD_HEATER_200_1;
 		}
-	}
 
-	mutex_lock(&data->lock);
-	ret = i2c_master_send(data->client, cmd, SHT4X_CMD_LEN);
-	mutex_unlock(&data->lock);
+		ret = i2c_master_send(data->client, &cmd, SHT4X_CMD_LEN);
+	}
 
 	return ret;
 }
@@ -334,14 +323,14 @@ static ssize_t heater_time_store(struct device *dev,
 	return count;
 }
 
-static SENSOR_DEVICE_ATTR_RW(heater_enable, heater_enable, 0);
-static SENSOR_DEVICE_ATTR_RW(heater_power, heater_power, 0);
-static SENSOR_DEVICE_ATTR_RW(heater_time, heater_time, 0);
+static DEVICE_ATTR_WO(heater_enable);
+static DEVICE_ATTR_RW(heater_power);
+static DEVICE_ATTR_RW(heater_time);
 
 static struct attribute *sht4x_attrs[] = {
-	&sensor_dev_attr_heater_enable.dev_attr.attr,
-	&sensor_dev_attr_heater_power.dev_attr.attr,
-	&sensor_dev_attr_heater_time.dev_attr.attr,
+	&dev_attr_heater_enable.attr,
+	&dev_attr_heater_power.attr,
+	&dev_attr_heater_time.attr,
 	NULL
 };
 

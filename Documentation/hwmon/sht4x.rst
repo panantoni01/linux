@@ -48,7 +48,8 @@ heater_time	The requested operating time of the heater,
 		in milliseconds.
 		Available values: 100, 1000 (default 1000).
 heater_enable	Enable the heater with the selected power
-		and for the selected time. Write-only.
+		and for the selected time in order to remove
+		condensed water from the sensor surface. Write-only.
 
 			- 0: turn off
 			- 1: turn on
