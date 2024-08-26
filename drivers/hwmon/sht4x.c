@@ -250,7 +250,7 @@ static ssize_t heater_enable_store(struct device *dev,
 				cmd = SHT4X_CMD_HEATER_110_01;
 			else /* data->heater_time == 1000 */
 				cmd = SHT4X_CMD_HEATER_110_1;
-		} else if (data->heater_power == 200) {
+		} else /* data->heater_power == 200 */ {
 			if (data->heater_time == 100)
 				cmd = SHT4X_CMD_HEATER_200_01;
 			else /* data->heater_time == 1000 */
