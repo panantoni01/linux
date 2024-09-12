@@ -3629,11 +3629,18 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/iio/accel/bosch,bma400.yaml
 F:	drivers/iio/accel/bma400*
 
-BPF JIT for ARM
-M:	Shubham Bansal <illusionist.neo@gmail.com>
+BOSCH SENSORTEC BMI270 IMU IIO DRIVER
+M:	Alex Lanzano <lanzano.alex@gmail.com>
+L:	linux-iio@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/iio/imu/bosch,bmi270.yaml
+F:	drivers/iio/imu/bmi270/
+
+BPF JIT for ARC
+M:	Shahab Vahedi <shahab@synopsys.com>
 L:	bpf@vger.kernel.org
-S:	Odd Fixes
-F:	arch/arm/net/
+S:	Maintained
+F:	arch/arc/net/
 
 BPF JIT for ARM64
 M:	Daniel Borkmann <daniel@iogearbox.net>
