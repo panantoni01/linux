@@ -56,28 +56,33 @@ DECLARE_CRC8_TABLE(sht4x_crc8_table);
  * struct sht4x_data - All the data required to operate an SHT4X chip
  * @client: the i2c client associated with the SHT4X
  * @lock: a mutex that is used to prevent parallel access to the i2c client
+ * @heating_complete: the time that the last heating finished
+ * @data_pending: true if and only if there are measurements to retrieve after heating
+ * @heater_power: the power at which the heater will be started
+ * @heater_time: the time for which the heater will remain turned on
+ * @valid: validity of fields below
  * @update_interval: the minimum poll interval
  * @last_updated: the previous time that the SHT4X was polled
  * @temperature: the latest temperature value received from the SHT4X
  * @humidity: the latest humidity value received from the SHT4X
- * @heater_power: the power at which the heater will be started
- * @heater_time: the time for which the heater will remain turned on
  */
 struct sht4x_data {
 	struct i2c_client	*client;
 	struct mutex		lock;	/* atomic read data updates */
+	unsigned long		heating_complete;	/* in jiffies */
+	bool			data_pending;
+	u32			heater_power;	/* in milli-watts */
+	u32			heater_time;	/* in milli-seconds */
 	bool			valid;	/* validity of fields below */
 	long			update_interval;	/* in milli-seconds */
 	long			last_updated;	/* in jiffies */
 	s32			temperature;
 	s32			humidity;
-	u32			heater_power;	/* in milli-watts */
-	u32			heater_time;	/* in milli-seconds */
 };
 
 /**
  * sht4x_read_values() - read and parse the raw data from the SHT4X
- * @sht4x_data: the struct sht4x_data to use for the lock
+ * @data: the struct sht4x_data to use for the lock
  * Return: 0 if successful, -ERRNO if not
  */
 static int sht4x_read_values(struct sht4x_data *data)
@@ -89,19 +94,30 @@ static int sht4x_read_values(struct sht4x_data *data)
 	u8 crc;
 	u8 cmd[SHT4X_CMD_LEN] = {SHT4X_CMD_MEASURE_HPM};
 	u8 raw_data[SHT4X_RESPONSE_LENGTH];
+	unsigned long curr_jiffies;
 
 	mutex_lock(&data->lock);
-	next_update = data->last_updated +
-		      msecs_to_jiffies(data->update_interval);
 
-	if (data->valid && time_before_eq(jiffies, next_update))
-		goto unlock;
+	curr_jiffies = jiffies;
+	if (time_before(curr_jiffies, data->heating_complete))
+		msleep(jiffies_to_msecs(data->heating_complete - curr_jiffies));
 
-	ret = i2c_master_send(client, cmd, SHT4X_CMD_LEN);
-	if (ret < 0)
-		goto unlock;
+	if (data->data_pending &&
+	    time_before(jiffies, data->heating_complete + data->update_interval)) {
+		data->data_pending = false;
+	} else {
+		next_update = data->last_updated +
+			msecs_to_jiffies(data->update_interval);
 
-	usleep_range(SHT4X_MEAS_DELAY_HPM, SHT4X_MEAS_DELAY_HPM + SHT4X_DELAY_EXTRA);
+		if (data->valid && time_before_eq(jiffies, next_update))
+			goto unlock;
+
+		ret = i2c_master_send(client, cmd, SHT4X_CMD_LEN);
+		if (ret < 0)
+			goto unlock;
+
+		usleep_range(SHT4X_MEAS_DELAY_HPM, SHT4X_MEAS_DELAY_HPM + SHT4X_DELAY_EXTRA);
+	}
 
 	ret = i2c_master_recv(client, raw_data, SHT4X_RESPONSE_LENGTH);
 	if (ret != SHT4X_RESPONSE_LENGTH) {
@@ -225,6 +241,15 @@ static int sht4x_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 	}
 }
 
+static ssize_t heater_enable_show(struct device *dev,
+				  struct device_attribute *attr,
+				  char *buf)
+{
+	struct sht4x_data *data = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", time_before(jiffies, data->heating_complete));
+}
+
 static ssize_t heater_enable_store(struct device *dev,
 				   struct device_attribute *attr,
 				   const char *buf,
@@ -234,32 +259,49 @@ static ssize_t heater_enable_store(struct device *dev,
 	bool status;
 	ssize_t ret;
 	u8 cmd;
+	u32 heating_time_bound;
 
 	ret = kstrtobool(buf, &status);
 	if (ret)
 		return ret;
+	if (!status)
+		return -EINVAL;
 
-	if (status) {
-		if (data->heater_power == 20) {
-			if (data->heater_time == 100)
-				cmd = SHT4X_CMD_HEATER_20_01;
-			else /* data->heater_time == 1000 */
-				cmd = SHT4X_CMD_HEATER_20_1;
-		} else if (data->heater_power == 110) {
-			if (data->heater_time == 100)
-				cmd = SHT4X_CMD_HEATER_110_01;
-			else /* data->heater_time == 1000 */
-				cmd = SHT4X_CMD_HEATER_110_1;
-		} else /* data->heater_power == 200 */ {
-			if (data->heater_time == 100)
-				cmd = SHT4X_CMD_HEATER_200_01;
-			else /* data->heater_time == 1000 */
-				cmd = SHT4X_CMD_HEATER_200_1;
-		}
+	if (data->heater_time == 100) {
+		if (data->heater_power == 20)
+			cmd = SHT4X_CMD_HEATER_20_01;
+		else if (data->heater_power == 110)
+			cmd = SHT4X_CMD_HEATER_110_01;
+		else /* data->heater_power == 200 */
+			cmd = SHT4X_CMD_HEATER_200_01;
 
-		ret = i2c_master_send(data->client, &cmd, SHT4X_CMD_LEN);
+		heating_time_bound = 110;
+	} else { /* data->heater_time == 1000 */
+		if (data->heater_power == 20)
+			cmd = SHT4X_CMD_HEATER_20_1;
+		else if (data->heater_power == 110)
+			cmd = SHT4X_CMD_HEATER_110_1;
+		else /* data->heater_power == 200 */
+			cmd = SHT4X_CMD_HEATER_200_1;
+
+		heating_time_bound = 1100;
 	}
 
+	mutex_lock(&data->lock);
+
+	if (time_before(jiffies, data->heating_complete)) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	ret = i2c_master_send(data->client, &cmd, SHT4X_CMD_LEN);
+	if (ret < 0)
+		goto unlock;
+
+	data->heating_complete = jiffies + msecs_to_jiffies(heating_time_bound);
+	data->data_pending = true;
+unlock:
+	mutex_unlock(&data->lock);
 	return ret;
 }
 
@@ -323,7 +365,7 @@ static ssize_t heater_time_store(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR_WO(heater_enable);
+static DEVICE_ATTR_RW(heater_enable);
 static DEVICE_ATTR_RW(heater_power);
 static DEVICE_ATTR_RW(heater_time);
 
@@ -378,6 +420,7 @@ static int sht4x_probe(struct i2c_client *client)
 	data->client = client;
 	data->heater_power = 200;
 	data->heater_time = 1000;
+	data->heating_complete = jiffies;
 
 	mutex_init(&data->lock);
 
@@ -399,7 +442,7 @@ static int sht4x_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sht4x_id[] = {
-	{ "sht4x", 0 },
+	{ "sht4x" },
 	{ },
 };
 MODULE_DEVICE_TABLE(i2c, sht4x_id);
