@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&soc>;
+		__overlay__ {
+            reg_3v3: reg_3v3@0 {
+				compatible = "regulator-fixed";
+				regulator-name = "3V3";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&i2cbus>;
+		__dormant__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+			clock-frequency = <400000>;
+
+			si7210: si7210@30 {
+				compatible = "silabs,si7210";
+				reg = <0x30>;
+				interrupt-parent = <&gpio>;
+				interrupts = <4 2>;
+				pinctrl-0 = <&int_pins>;
+				pinctrl-names = "default";
+                vdd-supply = <&reg_3v3>;
+			};
+		};
+	};
+};
