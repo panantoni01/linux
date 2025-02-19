@@ -8,14 +8,19 @@
  *  https://www.silabs.com/documents/public/data-sheets/si7210-datasheet.pdf
  */
 
-#include <linux/array_size.h>
+//#include <linux/array_size.h>
 #include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/i2c.h>
+#include <linux/iio/events.h>
 #include <linux/iio/iio.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
+#include <linux/log2.h>
 #include <linux/math64.h>
+#include <linux/minmax.h>
 #include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
@@ -31,12 +36,26 @@
 #define SI7210_MASK_DSPSIGSEL	GENMASK(2, 0)
 #define SI7210_REG_DSPSIGSEL	0xC3
 
+#define SI7210_MASK_SLEEP	BIT(0)
 #define SI7210_MASK_STOP	BIT(1)
 #define SI7210_MASK_ONEBURST	BIT(2)
+#define SI7210_MASK_USESTORE	BIT(3)
 #define SI7210_REG_POWER_CTRL	0xC4
 
 #define SI7210_MASK_ARAUTOINC	BIT(0)
 #define SI7210_REG_ARAUTOINC	0xC5
+
+#define SI7210_MASK_OP		GENMASK(6, 0)
+#define SI7210_MASK_LOW4FIELD	BIT(7)
+#define SI7210_REG_THRESHOLD	0xC6
+
+#define SI7210_MASK_HYST	GENMASK(5, 0)
+#define SI7210_MASK_FIELDPOLSEL	GENMASK(7, 6)
+#define SI7210_REG_HYSTERESIS	0xC7
+
+#define SI7210_MASK_SLTIMEENA	BIT(0)
+#define SI7210_MASK_TAMPER	GENMASK(7, 2)
+#define SI7210_REG_TAMPER	0xC9
 
 #define SI7210_REG_A0		0xCA
 #define SI7210_REG_A1		0xCB
@@ -82,8 +101,8 @@ static const unsigned int a200_otp_regs[A_REGS_COUNT] = {
 };
 
 static const struct regmap_range si7210_read_reg_ranges[] = {
-	regmap_reg_range(SI7210_REG_DSPSIGM, SI7210_REG_ARAUTOINC),
-	regmap_reg_range(SI7210_REG_A0, SI7210_REG_A2),
+	regmap_reg_range(SI7210_REG_DSPSIGM, SI7210_REG_HYSTERESIS),
+	regmap_reg_range(SI7210_REG_TAMPER, SI7210_REG_A2),
 	regmap_reg_range(SI7210_REG_A3, SI7210_REG_A5),
 	regmap_reg_range(SI7210_REG_OTP_ADDR, SI7210_REG_OTP_CTRL),
 };
@@ -94,8 +113,8 @@ static const struct regmap_access_table si7210_readable_regs = {
 };
 
 static const struct regmap_range si7210_write_reg_ranges[] = {
-	regmap_reg_range(SI7210_REG_DSPSIGSEL, SI7210_REG_ARAUTOINC),
-	regmap_reg_range(SI7210_REG_A0, SI7210_REG_A2),
+	regmap_reg_range(SI7210_REG_DSPSIGSEL, SI7210_REG_HYSTERESIS),
+	regmap_reg_range(SI7210_REG_TAMPER, SI7210_REG_A2),
 	regmap_reg_range(SI7210_REG_A3, SI7210_REG_A5),
 	regmap_reg_range(SI7210_REG_OTP_ADDR, SI7210_REG_OTP_CTRL),
 };
@@ -135,6 +154,16 @@ struct si7210_data {
 	s8 scale_20_a[A_REGS_COUNT];
 	s8 scale_200_a[A_REGS_COUNT];
 	u8 curr_scale;
+	bool irq_enabled;
+};
+
+static const struct iio_event_spec si7210_magn_event[] = {
+	{
+		.type = IIO_EV_TYPE_THRESH,
+		.dir = IIO_EV_DIR_RISING,
+		.mask_separate = BIT(IIO_EV_INFO_ENABLE) |
+			BIT(IIO_EV_INFO_VALUE) | BIT(IIO_EV_INFO_HYSTERESIS),
+	},
 };
 
 static const struct iio_chan_spec si7210_channels[] = {
@@ -142,6 +171,8 @@ static const struct iio_chan_spec si7210_channels[] = {
 		.type = IIO_MAGN,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |
 			BIT(IIO_CHAN_INFO_SCALE) | BIT(IIO_CHAN_INFO_OFFSET),
+		.event_spec = si7210_magn_event,
+		.num_event_specs = ARRAY_SIZE(si7210_magn_event),
 	}, {
 		.type = IIO_TEMP,
 		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
@@ -327,6 +358,8 @@ static int si7210_device_wake(struct si7210_data *data)
 	if (ret != 0xFF)
 		return -EIO;
 
+	fsleep(1000);
+
 	return 0;
 }
 
@@ -339,7 +372,16 @@ static int si7210_device_init(struct si7210_data *data)
 	if (ret)
 		return ret;
 
-	fsleep(1000);
+	/* The tamper feature is disabled if sw_tamper = 63 */
+	ret = regmap_update_bits(data->regmap, SI7210_REG_TAMPER,
+				 SI7210_MASK_TAMPER, SI7210_MASK_TAMPER);
+	if (ret)
+		return ret;
+
+	ret = regmap_update_bits(data->regmap, SI7210_REG_POWER_CTRL,
+				 SI7210_MASK_USESTORE, SI7210_MASK_USESTORE);
+	if (ret)
+		return ret;
 
 	ret = si7210_read_otpreg_val(data, SI7210_OTPREG_TMP_GAIN, &data->temp_gain);
 	if (ret)
@@ -369,9 +411,207 @@ static int si7210_device_init(struct si7210_data *data)
 	return si7210_set_scale(data, 20);
 }
 
+static int si7210_read_event(struct iio_dev *indio_dev,
+			     const struct iio_chan_spec *chan,
+			     enum iio_event_type type,
+			     enum iio_event_direction dir,
+			     enum iio_event_info info,
+			     int *val, int *val2)
+{
+	struct si7210_data *data = iio_priv(indio_dev);
+	unsigned int raw_thresh, raw_hyst, result;
+	int ret;
+
+	ret = regmap_read(data->regmap, SI7210_REG_THRESHOLD, &raw_thresh);
+	if (ret)
+		return ret;
+
+	if (info == IIO_EV_INFO_VALUE) {
+
+		if ((raw_thresh & SI7210_MASK_OP) == SI7210_MASK_OP)
+			result = 0;
+		else
+			result = (16 + (raw_thresh & GENMASK(3, 0))) *
+				 (1 << FIELD_GET(GENMASK(6, 4), raw_thresh)) * 5;
+	} else { /* IIO_EV_INFO_HYSTERESIS */
+		ret = regmap_read(data->regmap, SI7210_REG_HYSTERESIS, &raw_hyst);
+		if (ret)
+			return ret;
+
+		if ((raw_hyst & SI7210_MASK_HYST) == SI7210_MASK_HYST)
+			result = 0;
+		else
+			result = (8 + (raw_hyst & GENMASK(2, 0))) *
+			         (1 << FIELD_GET(GENMASK(5, 3), raw_hyst)) * 5;
+
+		/* If sw_op = 127, the hysteresis is multiplied by 2 */
+		if ((raw_thresh & SI7210_MASK_OP) == SI7210_MASK_OP)
+			result *= 2;
+	}
+
+	if (data->curr_scale == 20) {
+		*val = result / CENTI;
+		*val2 = (MICRO / CENTI) * (result % CENTI);
+	} else { /* data->curr_scale == 200 */
+		*val = result / DECI;
+		*val2 = (MICRO / DECI) * (result % DECI);
+	}
+
+	return IIO_VAL_INT_PLUS_MICRO;
+}
+
+static int si7210_write_event(struct iio_dev *indio_dev,
+			      const struct iio_chan_spec *chan,
+			      enum iio_event_type type,
+			      enum iio_event_direction dir,
+			      enum iio_event_info info,
+			      int val, int val2)
+{
+	struct si7210_data *data = iio_priv(indio_dev);
+	int ret, raw_thresh;
+
+	if (val < 0)
+		return -EINVAL;
+
+	if (data->curr_scale == 20)
+		val = (val * CENTI + val2 / (MICRO / CENTI)) / 5;
+	else /* data->curr_scale == 200 */
+		val = (val * DECI + val2 / (MICRO / DECI)) / 5;
+
+	if (info == IIO_EV_INFO_VALUE) {
+		if (val < 16) {
+			val = SI7210_MASK_OP;
+		} else {
+			val = clamp_val(val, 16, 3840);
+			val = (ilog2(val / 16) << 4) | (val / (1 << ilog2(val / 16)) - 16);
+		}
+
+		ret = regmap_update_bits(data->regmap, SI7210_REG_THRESHOLD,
+					 SI7210_MASK_OP, val);
+		if (ret)
+			return ret;
+	} else { /* IIO_EV_INFO_HYSTERESIS */
+		ret = regmap_read(data->regmap, SI7210_REG_THRESHOLD, &raw_thresh);
+		if (ret)
+			return ret;
+
+		if ((raw_thresh & SI7210_MASK_OP) == SI7210_MASK_OP)
+			val /= 2;
+
+		if (val < 8) {
+			val = SI7210_MASK_HYST;
+		} else {
+			val = clamp_val(val, 8, 1792);
+			val = (ilog2(val / 8) << 3) | (val / (1 << ilog2(val / 8)) - 8);
+		}
+
+		ret = regmap_update_bits(data->regmap, SI7210_REG_HYSTERESIS,
+					 SI7210_MASK_HYST, val);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int si7210_read_event_config(struct iio_dev *indio_dev,
+				    const struct iio_chan_spec *chan,
+				    enum iio_event_type type,
+				    enum iio_event_direction dir)
+{
+	struct si7210_data *data = iio_priv(indio_dev);
+
+	return data->irq_enabled;
+}
+
+static int si7210_write_event_config(struct iio_dev *indio_dev,
+				     const struct iio_chan_spec *chan,
+				     enum iio_event_type type,
+				     enum iio_event_direction dir,
+				     int state)
+{
+	struct si7210_data *data = iio_priv(indio_dev);
+	int ret;
+
+	if (data->irq_enabled == state)
+		return 0;
+
+	guard(mutex)(&data->fetch_lock);
+
+	if (state) {
+		/* Variant 1 - IDLE state, more power any read causes the device to go out of sleep */
+		// ret = regmap_update_bits(data->regmap, SI7210_REG_POWER_CTRL,
+		// 			 SI7210_MASK_STOP,
+		// 			 SI7210_MASK_STOP);
+		// if (ret)
+		// 	return ret;
+
+		// ret = regmap_update_bits(data->regmap, SI7210_REG_TAMPER,
+		// 			 SI7210_MASK_SLTIMEENA,
+		// 			 ~SI7210_MASK_SLTIMEENA);
+		// if (ret)
+		// 	return ret;
+
+		// ret = regmap_update_bits(data->regmap, SI7210_REG_POWER_CTRL,
+		// 			 SI7210_MASK_STOP,
+		// 			 ~SI7210_MASK_STOP);
+		// if (ret)
+		// 	return ret;
+
+		/* Variant 2 - less power, any read causes the device to go out of sleep:
+		* cat in_magn_raw --> out of sleep
+		* echo -en 10.0 > events/in_magn_thresh_rising_hysteresis --> out of sleep AND remove I/O error
+		Also, oneburst = 0 is undocumented */
+		ret = regmap_update_bits(data->regmap, SI7210_REG_POWER_CTRL,
+					 SI7210_MASK_STOP,
+					 SI7210_MASK_STOP);
+		if (ret)
+			return ret;
+
+		ret = regmap_update_bits(data->regmap, SI7210_REG_TAMPER,
+					 SI7210_MASK_SLTIMEENA,
+					 SI7210_MASK_SLTIMEENA);
+		if (ret)
+			return ret;
+
+		printk("si7210: setting oneburst = 0, stop = 0, sleep = 0\n");
+		ret = regmap_update_bits(data->regmap, SI7210_REG_POWER_CTRL,
+					 0x7,
+					 0x0);
+		if (ret)
+			return ret;
+	} else {
+
+	}
+
+	data->irq_enabled = state;
+
+	return 0;
+}
+
+static irqreturn_t si7210_interrupt_handler(int irq, void *private)
+{
+	struct iio_dev *indio_dev = private;
+
+	printk("si7120: interrupt received\n");
+
+	iio_push_event(indio_dev,
+		       IIO_UNMOD_EVENT_CODE(IIO_MAGN,
+					    0,
+					    IIO_EV_TYPE_THRESH,
+					    IIO_EV_DIR_RISING),
+		       iio_get_time_ns(indio_dev));
+
+	return IRQ_HANDLED;
+}
+
 static const struct iio_info si7210_info = {
 	.read_raw = si7210_read_raw,
 	.write_raw = si7210_write_raw,
+	.read_event_value = si7210_read_event,
+	.write_event_value = si7210_write_event,
+	.read_event_config = si7210_read_event_config,
+	.write_event_config = si7210_write_event_config,
 };
 
 static int si7210_probe(struct i2c_client *client)
@@ -386,6 +626,7 @@ static int si7210_probe(struct i2c_client *client)
 
 	data = iio_priv(indio_dev);
 	data->client = client;
+	data->irq_enabled = false;
 
 	ret = devm_mutex_init(&client->dev, &data->fetch_lock);
 	if (ret)
@@ -415,6 +656,17 @@ static int si7210_probe(struct i2c_client *client)
 	if (ret)
 		return dev_err_probe(&client->dev, ret,
 				     "device initialization failed\n");
+
+	if (client->irq) {
+		ret = devm_request_threaded_irq(&client->dev, client->irq,
+						NULL, si7210_interrupt_handler,
+						IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+						indio_dev->name, indio_dev);
+		if (ret) {
+			dev_err_probe(&client->dev, ret, "irq request error\n");
+			return ret;
+		}
+	}
 
 	return devm_iio_device_register(&client->dev, indio_dev);
 }
