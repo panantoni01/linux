@@ -3,6 +3,7 @@
 dtb-$(CONFIG_ARCH_BCM2835) += overlay_map.dtb hat_map.dtb
 
 dtbo-$(CONFIG_ARCH_BCM2835) += \
+	abx81x.dtbo \
 	act-led.dtbo \
 	adafruit-st7735r.dtbo \
 	adafruit18.dtbo \
