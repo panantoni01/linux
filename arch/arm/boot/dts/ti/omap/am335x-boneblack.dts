@@ -14,6 +14,47 @@
 	compatible = "ti,am335x-bone-black", "ti,am335x-bone", "ti,am33xx";
 };
 
+&am33xx_pinmux {
+        spi0_pins: spi0-pins {
+                pinctrl-single,pins = <
+			AM33XX_PADCONF(AM335X_PIN_SPI0_SCLK, PIN_INPUT_PULLUP, MUX_MODE0)
+			AM33XX_PADCONF(AM335X_PIN_SPI0_D0,   PIN_INPUT_PULLUP, MUX_MODE0)
+			AM33XX_PADCONF(AM335X_PIN_SPI0_D1,   PIN_OUTPUT,  MUX_MODE0)
+			AM33XX_PADCONF(AM335X_PIN_SPI0_CS0,  PIN_INPUT_PULLUP, MUX_MODE0)
+                >;
+        };
+
+	spi0_irq_pins: spi0-irq-pins {
+                pinctrl-single,pins = <
+                        AM33XX_PADCONF(AM335X_PIN_GPMC_BEN1, PIN_INPUT_PULLUP, MUX_MODE7)
+                >;
+	};
+};
+
+&spi0 {
+	status = "okay";
+
+	pinctrl-0 = <&spi0_pins>;
+	pinctrl-names = "default";
+
+	ab1815@0 {
+		compatible = "abracon,ab1815";
+		reg = <0>;
+		spi-max-frequency = <2000000>;
+
+		abracon,tc-diode = "schottky";
+		abracon,tc-resistor = <3>;
+
+		interrupt-parent = <&gpio1>;
+		interrupts = <28 2>; /* 2 == IRQ_TYPE_EDGE_FALLING */
+
+		pinctrl-0 = <&spi0_irq_pins>;
+		pinctrl-names = "default";
+
+		status = "okay";
+	};
+};
+
 &cpu0_opp_table {
 	/*
 	 * All PG 2.0 silicon may not support 1GHz but some of the early
